@@ -1,0 +1,17 @@
+[package]
+name = "cgol"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cgol"
+path = "src/cgol.rs"
+
+[profile.dev]
+opt-level = 3
+
+[profile.noopt]
+inherits = "dev"
+opt-level = 0
+
+[dependencies]
