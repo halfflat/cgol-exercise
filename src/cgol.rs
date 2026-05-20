@@ -1,128 +1,23 @@
 use std::error::Error;
 use std::env;
 use std::fmt;
-use std::mem;
+use std::io;
 use std::process::ExitCode;
 use std::thread;
 use std::str::FromStr;
 use std::time;
-use std::vec;
-use std::ops::Index;
-use std::ops::IndexMut;
 
-/*
-// cgol width height [[--at X,Y] SOFCODE]...
+#[path = "render-chars.rs"]
+pub mod render_chars;
+pub mod render;
+pub mod tile;
+pub mod universe;
 
-enum SofElem {
-    D(u32), // consecutive dead cells
-    A(u32), // consecutive live cells
-    L(u32)  // consecutive new lines
-}
-
-struct PatternSpec {
-    x_offset: i32,
-    y_offset: i32,
-    elements: Vec<SofElem>
-}
-
-struct Options {
-    width: u32,
-    height: u32,
-    patterns: Vec<PatternSpec>
-}
-*/
-
-struct Universe {
-    width: u32,
-    height: u32,
-    data: Vec<u8>,  // row-major ordered array, (width+2) × (height+2)
-    next: Vec<u8>
-}
-
-struct UniverseView<'a> {
-    stride: u32,
-    dataref: &'a Vec<u8>
-}
-
-struct UniverseMutView<'a> {
-    stride: u32,
-    dataref: &'a mut Vec<u8>
-}
-
-impl<'a> Index<[u32; 2]> for UniverseView<'a> {
-    type Output = u8;
-
-    fn index(&self, ij: [u32; 2]) -> &u8 {
-        let [i, j] = ij;
-        &self.dataref[(i+self.stride*j) as usize]
-    }
-}
-
-impl<'a> Index<[u32; 2]> for UniverseMutView<'a> {
-    type Output = u8;
-
-    fn index(&self, ij: [u32; 2]) -> &u8 {
-        let [i, j] = ij;
-        &self.dataref[(i+self.stride*j) as usize]
-    }
-}
-
-impl<'a> IndexMut<[u32; 2]> for UniverseMutView<'a> {
-    fn index_mut(&mut self, ij: [u32; 2]) -> &mut u8 {
-        let [i, j] = ij;
-        &mut self.dataref[(i+self.stride*j) as usize]
-    }
-}
-
-impl Universe {
-    fn init(width: u32, height: u32) -> Self {
-        let s = ((width+2)*(height+2)) as usize;
-        Universe{width, height, data: vec![0u8; s], next: vec![0u8; s]}
-    }
-    fn stride(&self) -> u32 { self.width+2 }
-    fn view<'a>(&'a self) -> UniverseView<'a> { UniverseView{stride: self.stride(), dataref: &self.data} }
-    fn mut_view<'a>(&'a mut self) -> UniverseMutView<'a> { UniverseMutView{stride: self.stride(), dataref: &mut self.data} }
-
-    fn advance(&mut self) {
-        // can't use Universe::view() above because of ownership.
-
-        let cur = UniverseView{stride: self.stride(), dataref: &self.data};
-        let mut next = UniverseMutView{stride: self.stride(), dataref: &mut self.next};
-
-        for j in 1..=self.height {
-            for i in 1..=self.width {
-                let n: u8 = cur[[i-1, j-1]]+cur[[i,j-1]]+cur[[i+1,j-1]]+cur[[i-1,j]]+cur[[i+1,j]]+cur[[i-1,j+1]]+cur[[i,j+1]]+cur[[i+1,j+1]];
-                let check: u8 = n*2 + cur[[i,j]];
-
-                next[[i, j]] = match check { 5..=7 => 1, _ => 0 };
-            }
-        }
-        mem::swap(&mut self.data, &mut self.next)
-    }
-}
-
-impl fmt::Display for Universe {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let pats: [char; 16] = [' ','▘','▝','▀','▖','▌','▞','▛','▗','▚','▐','▜','▄','▙','▟','█'];
-        let w = self.width;
-        let h = self.height;
-        let g = self.view();
-
-        writeln!(f, "┌{:─<1$}┐", "", ((w+1)/2) as usize)?;
-
-        for j2 in 0..=(h-1)/2 {
-            write!(f, "│")?;
-            for i2 in 0..=(w-1)/2 {
-                let i = 2*i2;
-                let j = 2*j2;
-                let k = g[[i,j]]+2*g[[i+1,j]]+4*g[[i,j+1]]+8*g[[i+1,j+1]];
-                write!(f, "{}",pats[k as usize])?;
-            }
-            writeln!(f, "│")?
-        }
-        writeln!(f, "└{:─<1$}┘", "", ((w+1)/2) as usize)
-    }
-}
+use crate::render_chars::{RenderChars,RenderCharsConfig};
+use crate::render::Renderer;
+use crate::tile::{Tile, Layout};
+use crate::universe::Universe;
+use std::io::Write;
 
 fn parse_1or2<T: FromStr + Copy>(s: &str) -> Result<(T, T), <T as FromStr>::Err> {
     if let Some(comma) = s.find(',') {
@@ -291,7 +186,7 @@ static USAGE: &str = "[OPTION]...
   -s, --size=X[,Y]   specify domain size
   -N, --steps=N      run for N steps
   -d, --delay=TIME   delay TIME ms between steps
-  -T, --terminal     use VT100 escape sequences in rendering
+  -t, --terminal     use VT100 escape sequences in rendering
 
   -h, --help         display this help and exit";
 
@@ -309,31 +204,46 @@ fn main() -> ExitCode {
         let steps = clopts.opt_steps.unwrap_or(std::u32::MAX);
 
         let mut u = Universe::init(nx, ny);
-        let mut m = u.mut_view();
 
-        m[[2,1]] = 1u8;
-        m[[3,2]] = 1u8;
-        m[[1,3]] = 1u8;
-        m[[2,3]] = 1u8;
-        m[[3,3]] = 1u8;
+        let glider = vec![0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 1u8, 1u8, 1u8];
+        let glider_tile = Tile::tile(Layout{columns: 3, stride: 3, rows: 3}, &glider[..]);
+
+        u.put_tile(&glider_tile, [1, 1]);
 
         let rc = if clopts.opt_terminal { "\x1b8" } else { "" };
         let sc = if clopts.opt_terminal { "\x1b7" } else { "" };
 
+        let renderer = Box::new(RenderChars::new(Default::default(), [nx, ny]));
+
         if clopts.opt_terminal {
+            let mut out: Box<dyn Write> = Box::new(io::stdout());
+
             let cuu = "\x1b[1A";
-            // this feels so hacky
-            let nlines = 3+(ny+1)/2;
+            let nlines = renderer.tty_lines();
             for _ in 0..nlines { print!("\n") }
             for _ in 0..nlines { print!("{cuu}") }
+
+            println!("{sc}");
+            renderer.write_prologue(&mut out)?;
+            for _ in 0..steps {
+                if delay>0 { thread::sleep(time::Duration::from_millis(delay)) }
+                u.advance();
+                println!("{rc}{sc}");
+                renderer.write_frame(&mut out, &u)?;
+            }
+            renderer.write_epilogue(&mut out)?;
+        }
+        else {
+            let mut out: Box<dyn Write> = Box::new(io::stdout());
+
+            renderer.write_prologue(&mut out)?;
+            for _ in 0..steps {
+                u.advance();
+                renderer.write_frame(&mut out, &u)?;
+            }
+            renderer.write_epilogue(&mut out)?;
         }
 
-        println!("{sc}{u}");
-        for _ in 0..steps {
-            if delay>0 { thread::sleep(time::Duration::from_millis(delay)) }
-            u.advance();
-            println!("{rc}{sc}{u}");
-        }
         Ok(())
     };
 
