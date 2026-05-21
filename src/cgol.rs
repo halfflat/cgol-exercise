@@ -42,8 +42,8 @@ struct CLOptions {
     opt_steps: Option<u32>,
     // -d, --delay MILLISECONDS
     opt_delay: Option<u32>,
-    // -t, --terminal
-    opt_terminal: bool
+    // -t, --tty
+    opt_tty: bool
 
     // More options for the future...
     //
@@ -143,8 +143,8 @@ fn parse_clopts_from_args() -> Result<CLOptions, ParseCLOptionsError> {
                     opts.opt_help = true;
                     state = State::NoOpt
                 }
-                else if a == "-t" || a == "--terminal" {
-                    opts.opt_terminal = true;
+                else if a == "-t" || a == "--tty" {
+                    opts.opt_tty = true;
                     state = State::NoOpt
                 }
                 else {
@@ -186,7 +186,7 @@ static USAGE: &str = "[OPTION]...
   -s, --size=X[,Y]   specify domain size
   -N, --steps=N      run for N steps
   -d, --delay=TIME   delay TIME ms between steps
-  -t, --terminal     use VT100 escape sequences in rendering
+  -t, --tty          use VT100 escape sequences in rendering
 
   -h, --help         display this help and exit";
 
@@ -210,12 +210,12 @@ fn main() -> ExitCode {
 
         u.put_tile(&glider_tile, [1, 1]);
 
-        let rc = if clopts.opt_terminal { "\x1b8" } else { "" };
-        let sc = if clopts.opt_terminal { "\x1b7" } else { "" };
+        let rc = if clopts.opt_tty { "\x1b8" } else { "" };
+        let sc = if clopts.opt_tty { "\x1b7" } else { "" };
 
         let renderer = Box::new(RenderChars::new(Default::default(), [nx, ny]));
 
-        if clopts.opt_terminal {
+        if clopts.opt_tty {
             let mut out: Box<dyn Write> = Box::new(io::stdout());
 
             let cuu = "\x1b[1A";
@@ -223,12 +223,13 @@ fn main() -> ExitCode {
             for _ in 0..nlines { print!("\n") }
             for _ in 0..nlines { print!("{cuu}") }
 
-            println!("{sc}");
             renderer.write_prologue(&mut out)?;
+            print!("{sc}");
+            renderer.write_frame(&mut out, &u)?;
             for _ in 0..steps {
                 if delay>0 { thread::sleep(time::Duration::from_millis(delay)) }
                 u.advance();
-                println!("{rc}{sc}");
+                print!("{rc}{sc}");
                 renderer.write_frame(&mut out, &u)?;
             }
             renderer.write_epilogue(&mut out)?;
@@ -237,7 +238,9 @@ fn main() -> ExitCode {
             let mut out: Box<dyn Write> = Box::new(io::stdout());
 
             renderer.write_prologue(&mut out)?;
+            renderer.write_frame(&mut out, &u)?;
             for _ in 0..steps {
+                if delay>0 { thread::sleep(time::Duration::from_millis(delay)) }
                 u.advance();
                 renderer.write_frame(&mut out, &u)?;
             }
